@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+config.json
+shengtu-skill/config.json
