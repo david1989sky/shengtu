@@ -1,4 +1,4 @@
 interface:
   display_name: "shengtu-skill"
-  short_description: "通过 A站网关生成或编辑图片并保存到本地。"
+  short_description: "通过 Subarx 生图网关生成或编辑图片并保存到本地。"
   default_prompt: "Use $shengtu-skill to generate an image from my prompt and save it locally."

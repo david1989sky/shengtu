@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate or edit images through the A-site OpenAI-compatible image API."""
+"""Generate or edit images through the Subarx image gateway API."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 DEFAULT_BASE_URL = "https://www.subarx.com"
-API_KEY_ENV_NAMES = ("A站_API_KEY", "AISTATION_API_KEY", "AIWANWU_API_KEY")
+API_KEY_ENV_NAMES = ("SUBARX_IMAGE_API_KEY", "SUBARX_API_KEY", "AISTATION_API_KEY", "AIWANWU_API_KEY")
 CONFIG_FILE_NAME = "config.json"
 
 
@@ -177,14 +177,14 @@ def save_image(result: dict, out_path: Path) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Call the A-site image generation/edit API and save the result.")
+    parser = argparse.ArgumentParser(description="Call the Subarx image gateway API and save the result.")
     parser.add_argument("--prompt")
     parser.add_argument("--out", help="Output image path, usually .png")
     parser.add_argument("--size", default="1024x1024", help="Resolution string such as 1024x1024")
     parser.add_argument("--mode", choices=("generate", "edit"), default="generate")
     parser.add_argument("--base-url", default="")
     parser.add_argument("--api-key", default="")
-    parser.add_argument("--save-api-key", help="Save a dedicated A-site image API key to this skill's private config")
+    parser.add_argument("--save-api-key", help="Save a dedicated Subarx image API key to this skill's private config")
     parser.add_argument("--clear-api-key", action="store_true", help="Remove this skill's saved API key")
     parser.add_argument("--show-config-path", action="store_true", help="Print this skill's private config path")
     parser.add_argument("--model", default="gpt-image-2")
@@ -215,7 +215,7 @@ def main() -> int:
     api_key = resolved_api_key(args.api_key)
     if not api_key:
         print("Missing image API key.", file=sys.stderr)
-        print('Run: python scripts\\generate_image.py --save-api-key "YOUR_A_SITE_IMAGE_API_KEY"', file=sys.stderr)
+        print('Run: python scripts\\generate_image.py --save-api-key "YOUR_SUBARX_IMAGE_API_KEY"', file=sys.stderr)
         print("This saves only this skill's dedicated image key and does not change OPENAI_API_KEY.", file=sys.stderr)
         return 2
 

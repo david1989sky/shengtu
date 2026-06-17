@@ -15,5 +15,5 @@ Codex image-generation skill package for the Subarx OpenAI-compatible image API.
 Do not commit a real `config.json` or API key. Save local credentials through:
 
 ```bash
-python shengtu-skill/scripts/generate_image.py --save-api-key "YOUR_A_SITE_IMAGE_API_KEY"
+python shengtu-skill/scripts/generate_image.py --save-api-key "YOUR_SUBARX_IMAGE_API_KEY"
 ```

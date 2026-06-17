@@ -1,28 +1,28 @@
 ---
 name: shengtu-skill
-description: Generate or edit images through the A站 OpenAI-compatible image API. Use when the user asks for 生图, 生成图片, 图片编辑, 改图, A站生图, gpt-image-2 生图, or wants Codex to create local bitmap images through https://www.subarx.com.
+description: Generate or edit images through the Subarx 生图网关 OpenAI-compatible image API. Use when the user asks for 生图, 生成图片, 图片编辑, 改图, Subarx 生图, gpt-image-2 生图, or wants Codex to create local bitmap images through https://www.subarx.com.
 ---
 
 # shengtu-skill
 
-Use `shengtu-skill` to generate or edit images through the A站 image gateway and save output files locally.
+Use `shengtu-skill` to generate or edit images through the Subarx 生图网关 and save output files locally.
 
 ## Key Rules
 
 - Use the bundled script `scripts/generate_image.py` for image generation and editing.
-- Use only a dedicated A站 image API key.
+- Use only a dedicated Subarx 生图网关 image API key.
 - Use non-streaming image requests only.
 - Prefer raw image endpoints `/v1/images/generations` and `/v1/images/edits`; do not use streaming Responses/SSE requests for images.
 - Do not read from, write to, replace, or switch `OPENAI_API_KEY`.
 - Do not hard-code real API keys into `SKILL.md`, scripts, generated docs, or final answers.
-- If no image API key is configured, ask the user for their dedicated A站 image key, then save it with the script's `--save-api-key` command only after user confirmation.
+- If no image API key is configured, ask the user for their dedicated Subarx 生图网关 image key, then save it with the script's `--save-api-key` command only after user confirmation.
 
 ## API Key Lookup Order
 
 The script resolves the image key in this order:
 
 1. `--api-key`
-2. Environment variables: `A站_API_KEY`, `AISTATION_API_KEY`, `AIWANWU_API_KEY`
+2. Environment variables: `SUBARX_IMAGE_API_KEY`, `SUBARX_API_KEY`, then legacy names `AISTATION_API_KEY`, `AIWANWU_API_KEY`
 3. Local private config file managed by this skill
 
 The local private config is skill-specific and must not be shared with other skills.
@@ -32,7 +32,7 @@ The local private config is skill-specific and must not be shared with other ski
 When the user has no configured image key, tell them to run:
 
 ```powershell
-python scripts\generate_image.py --save-api-key "YOUR_A_SITE_IMAGE_API_KEY"
+python scripts\generate_image.py --save-api-key "YOUR_SUBARX_IMAGE_API_KEY"
 ```
 
 To see where the key is stored:
