@@ -12,12 +12,14 @@ import stat
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 
 DEFAULT_BASE_URL = "https://www.subarx.com"
 API_KEY_ENV_NAMES = ("SUBARX_IMAGE_API_KEY", "SUBARX_API_KEY", "AISTATION_API_KEY", "AIWANWU_API_KEY")
 CONFIG_FILE_NAME = "config.json"
+DEFAULT_OUTPUT_DIR_NAME = "生图"
 
 
 def config_dir() -> Path:
@@ -92,6 +94,20 @@ def resolved_api_key(cli_api_key: str | None = None) -> str | None:
 
 def resolved_base_url(cli_base_url: str | None = None) -> str:
     return str(cli_base_url or "").strip() or DEFAULT_BASE_URL
+
+
+def default_output_dir() -> Path:
+    return Path.home() / "Desktop" / DEFAULT_OUTPUT_DIR_NAME
+
+
+def resolved_output_path(cli_out: str | None, output_format: str = "png") -> Path:
+    value = str(cli_out or "").strip()
+    if value:
+        return Path(value)
+    suffix = str(output_format or "png").strip().lower().lstrip(".") or "png"
+    directory = default_output_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"shengtu-{datetime.now().strftime('%Y%m%d-%H%M%S')}.{suffix}"
 
 
 def request_json(url: str, api_key: str, payload: dict) -> dict:
@@ -179,7 +195,7 @@ def save_image(result: dict, out_path: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Call the Subarx image gateway API and save the result.")
     parser.add_argument("--prompt")
-    parser.add_argument("--out", help="Output image path, usually .png")
+    parser.add_argument("--out", help='Output image path, usually .png. Defaults to ~/Desktop/生图/shengtu-YYYYMMDD-HHMMSS.png')
     parser.add_argument("--size", default="1024x1024", help="Resolution string such as 1024x1024")
     parser.add_argument("--mode", choices=("generate", "edit"), default="generate")
     parser.add_argument("--base-url", default="")
@@ -209,8 +225,8 @@ def main() -> int:
         print(f"Saved image API key to {path}")
         return 0
 
-    if not args.prompt or not args.out:
-        parser.error("--prompt and --out are required unless using --save-api-key, --clear-api-key, or --show-config-path")
+    if not args.prompt:
+        parser.error("--prompt is required unless using --save-api-key, --clear-api-key, or --show-config-path")
 
     api_key = resolved_api_key(args.api_key)
     if not api_key:
@@ -220,7 +236,7 @@ def main() -> int:
         return 2
 
     base = resolved_base_url(args.base_url).rstrip("/")
-    out_path = Path(args.out)
+    out_path = resolved_output_path(args.out, args.output_format)
 
     if args.mode == "generate":
         payload = {
