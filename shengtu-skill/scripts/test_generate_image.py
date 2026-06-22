@@ -52,6 +52,46 @@ class RequestRetryTests(unittest.TestCase):
 
         self.assertIn("HTTP 504", str(ctx.exception))
 
+    def test_request_json_debug_logs_attempts_and_response_metadata(self):
+        payload = {"request_id": "req_123", "data": [{"url": "https://example.com/image.png"}]}
+        success_response = mock.MagicMock()
+        success_response.__enter__.return_value.read.return_value = json.dumps(payload).encode("utf-8")
+        success_response.__enter__.return_value.status = 200
+        success_response.__enter__.return_value.headers = {"x-request-id": "header_req_123"}
+
+        debug = mock.Mock()
+        with mock.patch.object(
+            generate_image.urllib.request,
+            "urlopen",
+            return_value=success_response,
+        ):
+            result = generate_image.request_json(
+                "https://www.subarx.com/v1/images/generations",
+                "k",
+                {"x": 1},
+                debug_log=debug,
+            )
+
+        self.assertEqual(payload, result)
+        joined = "\n".join(call.args[0] for call in debug.call_args_list)
+        self.assertIn("attempt 1/3", joined)
+        self.assertIn("response status=200", joined)
+        self.assertIn("x_request_id=header_req_123", joined)
+
+
+class DescribeResultTests(unittest.TestCase):
+    def test_describe_result_includes_request_and_payload_shape(self):
+        result = {
+            "request_id": "req_abc",
+            "data": [{"b64_json": "abc"}],
+        }
+
+        summary = generate_image.describe_result(result)
+
+        self.assertIn("request_id=req_abc", summary)
+        self.assertIn("items=1", summary)
+        self.assertIn("first_item=b64_json", summary)
+
 
 class SaveImageTests(unittest.TestCase):
     def test_save_image_writes_b64_payload(self):

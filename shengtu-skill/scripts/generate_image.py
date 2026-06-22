@@ -122,19 +122,72 @@ def backoff_seconds(attempt: int) -> float:
     return float(attempt)
 
 
-def perform_request(req: urllib.request.Request, *, max_retries: int = DEFAULT_MAX_RETRIES) -> dict:
+def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def default_debug_log(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def describe_result(result: dict) -> str:
+    request_id = str(result.get("request_id") or result.get("id") or "").strip() or "-"
+    data = result.get("data") or []
+    items = len(data) if isinstance(data, list) else 0
+    first_item = "-"
+    if items > 0 and isinstance(data[0], dict):
+        if data[0].get("b64_json"):
+            first_item = "b64_json"
+        elif data[0].get("url"):
+            first_item = "url"
+        else:
+            first_item = "unknown"
+    return f"request_id={request_id} items={items} first_item={first_item}"
+
+
+def perform_request(
+    req: urllib.request.Request,
+    *,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    debug_log=None,
+) -> dict:
     last_error: RuntimeError | None = None
+    debug = debug_log or (lambda _message: None)
+    started_at = now_ms()
     for attempt in range(max_retries + 1):
+        attempt_started_at = now_ms()
+        debug(f"attempt {attempt + 1}/{max_retries + 1} method={req.method} url={req.full_url}")
         try:
             with urllib.request.urlopen(req, timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                response_started_at = now_ms()
+                raw = resp.read().decode("utf-8")
+                result = json.loads(raw)
+                headers = getattr(resp, "headers", {}) or {}
+                x_request_id = "-"
+                if hasattr(headers, "get"):
+                    x_request_id = headers.get("x-request-id", "-")
+                debug(
+                    "response "
+                    f"status={getattr(resp, 'status', '-')} "
+                    f"attempt_elapsed_ms={response_started_at - attempt_started_at} "
+                    f"total_elapsed_ms={response_started_at - started_at} "
+                    f"x_request_id={x_request_id} "
+                    f"{describe_result(result)}"
+                )
+                return result
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             last_error = RuntimeError(f"HTTP {exc.code}: {detail}")
+            debug(
+                f"http_error status={exc.code} "
+                f"attempt_elapsed_ms={now_ms() - attempt_started_at} "
+                f"retryable={should_retry_http_error(exc)}"
+            )
             if attempt >= max_retries or not should_retry_http_error(exc):
                 raise last_error from exc
         except urllib.error.URLError as exc:
             last_error = RuntimeError(f"Network error: {exc}")
+            debug(f"network_error attempt_elapsed_ms={now_ms() - attempt_started_at} error={exc}")
             if attempt >= max_retries:
                 raise last_error from exc
 
@@ -143,7 +196,7 @@ def perform_request(req: urllib.request.Request, *, max_retries: int = DEFAULT_M
     raise last_error or RuntimeError("request failed")
 
 
-def request_json(url: str, api_key: str, payload: dict) -> dict:
+def request_json(url: str, api_key: str, payload: dict, *, debug_log=None) -> dict:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -154,10 +207,10 @@ def request_json(url: str, api_key: str, payload: dict) -> dict:
         },
         method="POST",
     )
-    return perform_request(req)
+    return perform_request(req, debug_log=debug_log)
 
 
-def request_multipart(url: str, api_key: str, fields: dict[str, str], files: list[tuple[str, Path]]) -> dict:
+def request_multipart(url: str, api_key: str, fields: dict[str, str], files: list[tuple[str, Path]], *, debug_log=None) -> dict:
     boundary = "----shengtu-skill-boundary"
     chunks: list[bytes] = []
 
@@ -188,7 +241,7 @@ def request_multipart(url: str, api_key: str, fields: dict[str, str], files: lis
         },
         method="POST",
     )
-    return perform_request(req)
+    return perform_request(req, debug_log=debug_log)
 
 
 def save_image(result: dict, out_path: Path) -> None:
@@ -230,6 +283,7 @@ def main() -> int:
     parser.add_argument("--output-format", default="png")
     parser.add_argument("--image", action="append", default=[], help="Input image for edit mode; repeatable")
     parser.add_argument("--mask", help="Optional mask image for edit mode")
+    parser.add_argument("--debug", action="store_true", help="Print timing and response metadata to stderr")
     args = parser.parse_args()
 
     if args.show_config_path:
@@ -258,6 +312,7 @@ def main() -> int:
 
     base = resolved_base_url(args.base_url).rstrip("/")
     out_path = resolved_output_path(args.out, args.output_format)
+    debug_log = default_debug_log if args.debug else None
 
     if args.mode == "generate":
         payload = {
@@ -268,7 +323,7 @@ def main() -> int:
             "n": args.n,
             "output_format": args.output_format,
         }
-        result = request_json(f"{base}/v1/images/generations", api_key, payload)
+        result = request_json(f"{base}/v1/images/generations", api_key, payload, debug_log=debug_log)
     else:
         image_paths = [Path(p) for p in args.image]
         if not image_paths:
@@ -294,7 +349,7 @@ def main() -> int:
                 print(f"Mask not found: {mask_path}", file=sys.stderr)
                 return 2
             files.append(("mask", mask_path))
-        result = request_multipart(f"{base}/v1/images/edits", api_key, fields, files)
+        result = request_multipart(f"{base}/v1/images/edits", api_key, fields, files, debug_log=debug_log)
 
     save_image(result, out_path)
     size = out_path.stat().st_size
