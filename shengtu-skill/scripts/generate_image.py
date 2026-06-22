@@ -10,6 +10,7 @@ import mimetypes
 import os
 import stat
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -20,6 +21,9 @@ DEFAULT_BASE_URL = "https://www.subarx.com"
 API_KEY_ENV_NAMES = ("SUBARX_IMAGE_API_KEY", "SUBARX_API_KEY", "AISTATION_API_KEY", "AIWANWU_API_KEY")
 CONFIG_FILE_NAME = "config.json"
 DEFAULT_OUTPUT_DIR_NAME = "生图"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 180
+DEFAULT_MAX_RETRIES = 2
+RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 def config_dir() -> Path:
@@ -110,6 +114,35 @@ def resolved_output_path(cli_out: str | None, output_format: str = "png") -> Pat
     return directory / f"shengtu-{datetime.now().strftime('%Y%m%d-%H%M%S')}.{suffix}"
 
 
+def should_retry_http_error(exc: urllib.error.HTTPError) -> bool:
+    return exc.code in RETRYABLE_HTTP_STATUS_CODES
+
+
+def backoff_seconds(attempt: int) -> float:
+    return float(attempt)
+
+
+def perform_request(req: urllib.request.Request, *, max_retries: int = DEFAULT_MAX_RETRIES) -> dict:
+    last_error: RuntimeError | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            last_error = RuntimeError(f"HTTP {exc.code}: {detail}")
+            if attempt >= max_retries or not should_retry_http_error(exc):
+                raise last_error from exc
+        except urllib.error.URLError as exc:
+            last_error = RuntimeError(f"Network error: {exc}")
+            if attempt >= max_retries:
+                raise last_error from exc
+
+        time.sleep(backoff_seconds(attempt + 1))
+
+    raise last_error or RuntimeError("request failed")
+
+
 def request_json(url: str, api_key: str, payload: dict) -> dict:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -121,13 +154,7 @@ def request_json(url: str, api_key: str, payload: dict) -> dict:
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            data = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
-    return json.loads(data)
+    return perform_request(req)
 
 
 def request_multipart(url: str, api_key: str, fields: dict[str, str], files: list[tuple[str, Path]]) -> dict:
@@ -161,13 +188,7 @@ def request_multipart(url: str, api_key: str, fields: dict[str, str], files: lis
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            data = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
-    return json.loads(data)
+    return perform_request(req)
 
 
 def save_image(result: dict, out_path: Path) -> None:
