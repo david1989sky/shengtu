@@ -70,7 +70,7 @@ python scripts\generate_image.py --mode edit --prompt "Improve the lighting and 
 
 ## Endpoints
 
-- Base URL: `https://www.subarx.com`
+- Base URL: `https://st.subarx.com`
 - Generation endpoint: `POST /v1/images/generations`
 - Edit endpoint: `POST /v1/images/edits`
 

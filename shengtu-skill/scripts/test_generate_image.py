@@ -80,6 +80,9 @@ class RequestRetryTests(unittest.TestCase):
 
 
 class DescribeResultTests(unittest.TestCase):
+    def test_resolved_base_url_defaults_to_st_subarx(self):
+        self.assertEqual("https://st.subarx.com", generate_image.resolved_base_url())
+
     def test_describe_result_includes_request_and_payload_shape(self):
         result = {
             "request_id": "req_abc",

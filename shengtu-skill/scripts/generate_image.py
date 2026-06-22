@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-DEFAULT_BASE_URL = "https://www.subarx.com"
+DEFAULT_BASE_URL = "https://st.subarx.com"
 API_KEY_ENV_NAMES = ("SUBARX_IMAGE_API_KEY", "SUBARX_API_KEY", "AISTATION_API_KEY", "AIWANWU_API_KEY")
 CONFIG_FILE_NAME = "config.json"
 DEFAULT_OUTPUT_DIR_NAME = "生图"
