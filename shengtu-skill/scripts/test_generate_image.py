@@ -80,6 +80,9 @@ class RequestRetryTests(unittest.TestCase):
 
 
 class DescribeResultTests(unittest.TestCase):
+    def test_default_request_timeout_seconds_is_300(self):
+        self.assertEqual(300, generate_image.DEFAULT_REQUEST_TIMEOUT_SECONDS)
+
     def test_resolved_base_url_defaults_to_st_subarx(self):
         self.assertEqual("https://st.subarx.com", generate_image.resolved_base_url())
 
