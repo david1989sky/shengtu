@@ -22,6 +22,7 @@ API_KEY_ENV_NAMES = ("SUBARX_IMAGE_API_KEY", "SUBARX_API_KEY", "AISTATION_API_KE
 CONFIG_FILE_NAME = "config.json"
 DEFAULT_OUTPUT_DIR_NAME = "生图"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 300
+DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 180
 DEFAULT_MAX_RETRIES = 2
 RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
@@ -130,19 +131,85 @@ def default_debug_log(message: str) -> None:
     print(message, file=sys.stderr)
 
 
+def is_data_url(value: str) -> bool:
+    return value.startswith("data:")
+
+
+def decode_data_url(value: str) -> bytes:
+    try:
+        header, encoded = value.split(",", 1)
+    except ValueError as exc:
+        raise RuntimeError("Invalid data URL image payload") from exc
+    if ";base64" not in header:
+        raise RuntimeError("Only base64 data URL image payloads are supported")
+    return base64.b64decode(encoded)
+
+
+def non_empty_string(value) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def image_carrier_from_item(item: dict) -> tuple[str, str] | None:
+    for key in ("b64_json", "base64", "image", "data"):
+        value = non_empty_string(item.get(key))
+        if value:
+            return ("data_url" if is_data_url(value) else key, value)
+
+    value = non_empty_string(item.get("url") or item.get("image_url"))
+    if value:
+        return ("data_url" if is_data_url(value) else "url", value)
+
+    result = item.get("result")
+    if isinstance(result, str) and result.strip():
+        value = result.strip()
+        return ("data_url" if is_data_url(value) else "result", value)
+    if isinstance(result, dict):
+        return image_carrier_from_item(result)
+
+    return None
+
+
+def iter_image_items(result: dict):
+    data = result.get("data")
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                yield "images", item
+
+    output = result.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") and item.get("type") != "image_generation_call":
+                continue
+            yield "responses", item
+
+
+def find_first_image_carrier(result: dict) -> tuple[str, str, str] | None:
+    for shape, item in iter_image_items(result):
+        carrier = image_carrier_from_item(item)
+        if carrier:
+            kind, value = carrier
+            return shape, kind, value
+    return None
+
+
 def describe_result(result: dict) -> str:
     request_id = str(result.get("request_id") or result.get("id") or "").strip() or "-"
-    data = result.get("data") or []
-    items = len(data) if isinstance(data, list) else 0
+    shape = "unknown"
+    items = 0
     first_item = "-"
-    if items > 0 and isinstance(data[0], dict):
-        if data[0].get("b64_json"):
-            first_item = "b64_json"
-        elif data[0].get("url"):
-            first_item = "url"
-        else:
-            first_item = "unknown"
-    return f"request_id={request_id} items={items} first_item={first_item}"
+    for item_shape, item in iter_image_items(result):
+        if shape == "unknown":
+            shape = item_shape
+        items += 1
+        if first_item == "-":
+            carrier = image_carrier_from_item(item)
+            first_item = carrier[0] if carrier else "unknown"
+    return f"request_id={request_id} shape={shape} items={items} first_item={first_item}"
 
 
 def perform_request(
@@ -244,26 +311,57 @@ def request_multipart(url: str, api_key: str, fields: dict[str, str], files: lis
     return perform_request(req, debug_log=debug_log)
 
 
-def save_image(result: dict, out_path: Path) -> None:
-    data = result.get("data") or []
-    if not data:
-        raise RuntimeError(f"Response has no data array: {json.dumps(result, ensure_ascii=False)[:1000]}")
+def download_image_url(image_url: str, *, debug_log=None) -> bytes:
+    debug = debug_log or (lambda _message: None)
+    last_error: RuntimeError | None = None
+    for attempt in range(DEFAULT_MAX_RETRIES + 1):
+        started_at = now_ms()
+        debug(f"download attempt {attempt + 1}/{DEFAULT_MAX_RETRIES + 1} url={image_url}")
+        try:
+            with urllib.request.urlopen(image_url, timeout=DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_SECONDS) as resp:
+                raw = resp.read()
+                debug(
+                    "download_response "
+                    f"status={getattr(resp, 'status', '-')} "
+                    f"elapsed_ms={now_ms() - started_at} "
+                    f"bytes={len(raw)}"
+                )
+                return raw
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            last_error = RuntimeError(f"Image URL HTTP {exc.code}: {detail}")
+            retryable = should_retry_http_error(exc)
+            debug(f"download_http_error status={exc.code} elapsed_ms={now_ms() - started_at} retryable={retryable}")
+            if attempt >= DEFAULT_MAX_RETRIES or not retryable:
+                raise last_error from exc
+        except urllib.error.URLError as exc:
+            last_error = RuntimeError(f"Image URL network error: {exc}")
+            debug(f"download_error elapsed_ms={now_ms() - started_at} error={exc}")
+            if attempt >= DEFAULT_MAX_RETRIES:
+                raise last_error from exc
+        time.sleep(backoff_seconds(attempt + 1))
+    raise last_error or RuntimeError("image URL download failed")
 
-    first = data[0]
-    b64_json = first.get("b64_json")
-    image_url = first.get("url")
+
+def save_image(result: dict, out_path: Path, *, debug_log=None) -> None:
+    carrier = find_first_image_carrier(result)
+    if not carrier:
+        raise RuntimeError(f"Response has no recognizable image payload: {json.dumps(result, ensure_ascii=False)[:1000]}")
+
+    shape, kind, value = carrier
+    debug = debug_log or (lambda _message: None)
+    debug(f"image_source shape={shape} kind={kind}")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if b64_json:
-        out_path.write_bytes(base64.b64decode(b64_json))
+    if kind == "data_url":
+        out_path.write_bytes(decode_data_url(value))
         return
 
-    if image_url:
-        with urllib.request.urlopen(image_url, timeout=180) as resp:
-            out_path.write_bytes(resp.read())
+    if kind == "url":
+        out_path.write_bytes(download_image_url(value, debug_log=debug_log))
         return
 
-    raise RuntimeError(f"Response has neither b64_json nor url: {json.dumps(first, ensure_ascii=False)[:1000]}")
+    out_path.write_bytes(base64.b64decode(value))
 
 
 def main() -> int:
@@ -351,7 +449,7 @@ def main() -> int:
             files.append(("mask", mask_path))
         result = request_multipart(f"{base}/v1/images/edits", api_key, fields, files, debug_log=debug_log)
 
-    save_image(result, out_path)
+    save_image(result, out_path, debug_log=debug_log)
     size = out_path.stat().st_size
     print(f"Saved {out_path} ({size} bytes)")
     return 0

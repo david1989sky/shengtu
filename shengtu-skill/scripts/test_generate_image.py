@@ -98,6 +98,24 @@ class DescribeResultTests(unittest.TestCase):
         self.assertIn("items=1", summary)
         self.assertIn("first_item=b64_json", summary)
 
+    def test_describe_result_identifies_responses_api_output_shape(self):
+        result = {
+            "id": "resp_abc",
+            "output": [
+                {
+                    "type": "image_generation_call",
+                    "result": {"base64": "abc"},
+                }
+            ],
+        }
+
+        summary = generate_image.describe_result(result)
+
+        self.assertIn("request_id=resp_abc", summary)
+        self.assertIn("shape=responses", summary)
+        self.assertIn("items=1", summary)
+        self.assertIn("first_item=base64", summary)
+
 
 class SaveImageTests(unittest.TestCase):
     def test_save_image_writes_b64_payload(self):
@@ -107,6 +125,55 @@ class SaveImageTests(unittest.TestCase):
             out = Path(tmp) / "out.png"
             generate_image.save_image(result, out)
             self.assertEqual(png_header, out.read_bytes())
+
+    def test_save_image_writes_responses_api_result_base64_payload(self):
+        png_header = b"\x89PNG\r\n\x1a\n"
+        result = {
+            "output": [
+                {
+                    "type": "image_generation_call",
+                    "result": {"base64": generate_image.base64.b64encode(png_header).decode("ascii")},
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.png"
+            generate_image.save_image(result, out)
+            self.assertEqual(png_header, out.read_bytes())
+
+    def test_save_image_writes_data_url_payload(self):
+        png_header = b"\x89PNG\r\n\x1a\n"
+        encoded = generate_image.base64.b64encode(png_header).decode("ascii")
+        result = {"data": [{"url": f"data:image/png;base64,{encoded}"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.png"
+            generate_image.save_image(result, out)
+            self.assertEqual(png_header, out.read_bytes())
+
+    def test_save_image_retries_downloaded_url_and_logs_source(self):
+        png_header = b"\x89PNG\r\n\x1a\n"
+        failed_response = mock.MagicMock()
+        failed_response.__enter__.side_effect = urllib.error.URLError("temporary")
+        success_response = mock.MagicMock()
+        success_response.__enter__.return_value.read.return_value = png_header
+        result = {"data": [{"url": "https://example.com/image.png"}]}
+        debug = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "out.png"
+            with mock.patch.object(
+                generate_image.urllib.request,
+                "urlopen",
+                side_effect=[failed_response, success_response],
+            ), mock.patch("time.sleep") as sleep:
+                generate_image.save_image(result, out, debug_log=debug)
+
+            self.assertEqual(png_header, out.read_bytes())
+
+        sleep.assert_called_once()
+        joined = "\n".join(call.args[0] for call in debug.call_args_list)
+        self.assertIn("image_source shape=images kind=url", joined)
+        self.assertIn("download_error", joined)
 
 
 if __name__ == "__main__":
