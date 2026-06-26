@@ -176,5 +176,59 @@ class SaveImageTests(unittest.TestCase):
         self.assertIn("download_error", joined)
 
 
+class UpscaleTests(unittest.TestCase):
+    def test_parse_size_accepts_width_by_height(self):
+        self.assertEqual((3840, 2160), generate_image.parse_size("3840x2160"))
+
+    def test_parse_size_rejects_invalid_value(self):
+        with self.assertRaises(ValueError):
+            generate_image.parse_size("4K")
+
+    def test_read_png_size_reads_header_dimensions(self):
+        header = (
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00\x00\x00\rIHDR"
+            + (3840).to_bytes(4, "big")
+            + (2160).to_bytes(4, "big")
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fake.png"
+            path.write_bytes(header)
+            self.assertEqual((3840, 2160), generate_image.read_image_size(path))
+
+    def test_maybe_upscale_skips_when_image_already_matches_target(self):
+        header = (
+            b"\x89PNG\r\n\x1a\n"
+            + b"\x00\x00\x00\rIHDR"
+            + (3840).to_bytes(4, "big")
+            + (2160).to_bytes(4, "big")
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "already-4k.png"
+            path.write_bytes(header)
+            with mock.patch.object(generate_image, "resize_exact_image") as resize:
+                generate_image.maybe_upscale_image(
+                    path,
+                    enabled=True,
+                    target_size="3840x2160",
+                    upscaler="auto",
+                    realesrgan_bin="realesrgan-ncnn-vulkan",
+                    realesrgan_model=generate_image.DEFAULT_REALESRGAN_MODEL,
+                )
+            resize.assert_not_called()
+
+    def test_auto_upscaler_prefers_realesrgan_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src.png"
+            out = Path(tmp) / "out.png"
+            src.write_bytes(b"not-a-real-image")
+            with mock.patch.object(generate_image, "command_exists", return_value="/usr/local/bin/realesrgan-ncnn-vulkan"):
+                with mock.patch.object(generate_image, "run_realesrgan") as run_realesrgan:
+                    method = generate_image.resize_exact_image(src, out, 3840, 2160, "auto")
+
+            self.assertEqual("realesrgan", method)
+            run_realesrgan.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

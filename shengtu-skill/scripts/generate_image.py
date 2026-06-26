@@ -8,13 +8,16 @@ import base64
 import json
 import mimetypes
 import os
+import shutil
 import stat
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 
 DEFAULT_BASE_URL = "https://st.subarx.com"
@@ -25,6 +28,7 @@ DEFAULT_REQUEST_TIMEOUT_SECONDS = 300
 DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 180
 DEFAULT_MAX_RETRIES = 2
 RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+DEFAULT_REALESRGAN_MODEL = "realesrgan-x4plus"
 
 
 def config_dir() -> Path:
@@ -364,6 +368,275 @@ def save_image(result: dict, out_path: Path, *, debug_log=None) -> None:
     out_path.write_bytes(base64.b64decode(value))
 
 
+def parse_size(value: str) -> tuple[int, int]:
+    raw = str(value or "").strip().lower()
+    if "x" not in raw:
+        raise ValueError(f"invalid size {value!r}; expected WIDTHxHEIGHT")
+    left, right = raw.split("x", 1)
+    width = int(left.strip())
+    height = int(right.strip())
+    if width <= 0 or height <= 0:
+        raise ValueError(f"invalid size {value!r}; dimensions must be positive")
+    return width, height
+
+
+def read_png_size(path: Path) -> tuple[int, int] | None:
+    try:
+        with path.open("rb") as fh:
+            header = fh.read(24)
+    except OSError:
+        return None
+    if len(header) >= 24 and header[:8] == b"\x89PNG\r\n\x1a\n":
+        return int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
+    return None
+
+
+def read_jpeg_size(path: Path) -> tuple[int, int] | None:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) < 4 or data[:2] != b"\xff\xd8":
+        return None
+    i = 2
+    while i + 9 < len(data):
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        i += 2
+        if marker in (0xD8, 0xD9):
+            continue
+        if i + 2 > len(data):
+            return None
+        segment_len = int.from_bytes(data[i : i + 2], "big")
+        if segment_len < 2 or i + segment_len > len(data):
+            return None
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            if segment_len >= 7:
+                height = int.from_bytes(data[i + 3 : i + 5], "big")
+                width = int.from_bytes(data[i + 5 : i + 7], "big")
+                return width, height
+        i += segment_len
+    return None
+
+
+def read_image_size(path: Path) -> tuple[int, int] | None:
+    return read_png_size(path) or read_jpeg_size(path)
+
+
+def command_exists(name: str) -> str | None:
+    return shutil.which(name)
+
+
+def run_command(args: list[str], *, debug_log=None) -> None:
+    debug = debug_log or (lambda _message: None)
+    debug("run " + " ".join(args))
+    completed = subprocess.run(args, check=False, capture_output=True, text=True)
+    if completed.returncode != 0:
+        details = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(f"Command failed ({completed.returncode}): {' '.join(args)}\n{details}")
+
+
+def resize_exact_with_pillow(input_path: Path, out_path: Path, target_width: int, target_height: int, *, debug_log=None) -> None:
+    try:
+        from PIL import Image, ImageFilter
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required for pillow upscaling. Install with: python -m pip install pillow") from exc
+
+    debug = debug_log or (lambda _message: None)
+    with Image.open(input_path) as image:
+        image = image.convert("RGB")
+        src_width, src_height = image.size
+        target_ratio = target_width / target_height
+        src_ratio = src_width / src_height
+        if src_ratio > target_ratio:
+            crop_width = int(round(src_height * target_ratio))
+            left = max(0, (src_width - crop_width) // 2)
+            image = image.crop((left, 0, left + crop_width, src_height))
+        elif src_ratio < target_ratio:
+            crop_height = int(round(src_width / target_ratio))
+            top = max(0, (src_height - crop_height) // 2)
+            image = image.crop((0, top, src_width, top + crop_height))
+        image = image.resize((target_width, target_height), Image.Resampling.LANCZOS)
+        image = image.filter(ImageFilter.UnsharpMask(radius=1.1, percent=110, threshold=3))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        image.save(out_path)
+        debug(f"upscale_pillow source={src_width}x{src_height} target={target_width}x{target_height}")
+
+
+def resize_exact_with_sips(input_path: Path, out_path: Path, target_width: int, target_height: int, *, debug_log=None) -> None:
+    if not command_exists("sips"):
+        raise RuntimeError("sips is not available on this system")
+    size = read_image_size(input_path)
+    if not size:
+        raise RuntimeError(f"Cannot determine image size: {input_path}")
+    src_width, src_height = size
+    target_ratio = target_width / target_height
+    src_ratio = src_width / src_height
+    crop_width = src_width
+    crop_height = src_height
+    if src_ratio > target_ratio:
+        crop_width = int(round(src_height * target_ratio))
+    elif src_ratio < target_ratio:
+        crop_height = int(round(src_width / target_ratio))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory() as tmp:
+        cropped = Path(tmp) / f"crop{input_path.suffix or '.png'}"
+        run_command(
+            [
+                "sips",
+                "-c",
+                str(crop_height),
+                str(crop_width),
+                str(input_path),
+                "--out",
+                str(cropped),
+            ],
+            debug_log=debug_log,
+        )
+        run_command(
+            [
+                "sips",
+                "-z",
+                str(target_height),
+                str(target_width),
+                str(cropped),
+                "--out",
+                str(out_path),
+            ],
+            debug_log=debug_log,
+        )
+
+
+def run_realesrgan(
+    input_path: Path,
+    out_path: Path,
+    *,
+    target_width: int,
+    target_height: int,
+    binary: str,
+    model: str,
+    debug_log=None,
+) -> None:
+    if not command_exists(binary) and not Path(binary).exists():
+        raise RuntimeError(
+            f"{binary} is not installed. Install Real-ESRGAN ncnn Vulkan and make realesrgan-ncnn-vulkan available in PATH."
+        )
+    size = read_image_size(input_path)
+    scale = 4
+    if size:
+        src_width, src_height = size
+        scale = max(2, min(4, int(max(target_width / src_width, target_height / src_height) + 0.999)))
+    with TemporaryDirectory() as tmp:
+        ai_out = Path(tmp) / f"realesrgan{input_path.suffix or '.png'}"
+        run_command(
+            [
+                binary,
+                "-i",
+                str(input_path),
+                "-o",
+                str(ai_out),
+                "-n",
+                model,
+                "-s",
+                str(scale),
+            ],
+            debug_log=debug_log,
+        )
+        resize_exact_image(ai_out, out_path, target_width, target_height, "auto-finalize", debug_log=debug_log)
+
+
+def resize_exact_image(
+    input_path: Path,
+    out_path: Path,
+    target_width: int,
+    target_height: int,
+    upscaler: str,
+    *,
+    realesrgan_bin: str = "realesrgan-ncnn-vulkan",
+    realesrgan_model: str = DEFAULT_REALESRGAN_MODEL,
+    debug_log=None,
+) -> str:
+    if upscaler == "realesrgan":
+        run_realesrgan(
+            input_path,
+            out_path,
+            target_width=target_width,
+            target_height=target_height,
+            binary=realesrgan_bin,
+            model=realesrgan_model,
+            debug_log=debug_log,
+        )
+        return "realesrgan"
+    if upscaler == "sips":
+        resize_exact_with_sips(input_path, out_path, target_width, target_height, debug_log=debug_log)
+        return "sips"
+    if upscaler == "pillow":
+        resize_exact_with_pillow(input_path, out_path, target_width, target_height, debug_log=debug_log)
+        return "pillow"
+    if upscaler == "auto-finalize":
+        try:
+            resize_exact_with_pillow(input_path, out_path, target_width, target_height, debug_log=debug_log)
+            return "pillow"
+        except RuntimeError:
+            resize_exact_with_sips(input_path, out_path, target_width, target_height, debug_log=debug_log)
+            return "sips"
+    if upscaler != "auto":
+        raise ValueError(f"unsupported upscaler: {upscaler}")
+    if command_exists(realesrgan_bin) or Path(realesrgan_bin).exists():
+        return resize_exact_image(
+            input_path,
+            out_path,
+            target_width,
+            target_height,
+            "realesrgan",
+            realesrgan_bin=realesrgan_bin,
+            realesrgan_model=realesrgan_model,
+            debug_log=debug_log,
+        )
+    try:
+        return resize_exact_image(input_path, out_path, target_width, target_height, "pillow", debug_log=debug_log)
+    except RuntimeError:
+        return resize_exact_image(input_path, out_path, target_width, target_height, "sips", debug_log=debug_log)
+
+
+def maybe_upscale_image(
+    out_path: Path,
+    *,
+    enabled: bool,
+    target_size: str,
+    upscaler: str,
+    realesrgan_bin: str,
+    realesrgan_model: str,
+    debug_log=None,
+) -> None:
+    if not enabled:
+        return
+    target_width, target_height = parse_size(target_size)
+    current = read_image_size(out_path)
+    if current == (target_width, target_height):
+        if debug_log:
+            debug_log(f"upscale_skip already_target_size={target_width}x{target_height}")
+        return
+    tmp_out = out_path.with_name(f"{out_path.stem}.upscaled{out_path.suffix or '.png'}")
+    method = resize_exact_image(
+        out_path,
+        tmp_out,
+        target_width,
+        target_height,
+        upscaler,
+        realesrgan_bin=realesrgan_bin,
+        realesrgan_model=realesrgan_model,
+        debug_log=debug_log,
+    )
+    tmp_out.replace(out_path)
+    final_size = read_image_size(out_path)
+    if final_size != (target_width, target_height):
+        raise RuntimeError(f"Upscale failed: expected {target_width}x{target_height}, got {final_size}")
+    print(f"Upscaled {out_path} to {target_width}x{target_height} via {method}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Call the Subarx image gateway API and save the result.")
     parser.add_argument("--prompt")
@@ -381,6 +654,16 @@ def main() -> int:
     parser.add_argument("--output-format", default="png")
     parser.add_argument("--image", action="append", default=[], help="Input image for edit mode; repeatable")
     parser.add_argument("--mask", help="Optional mask image for edit mode")
+    parser.add_argument("--upscale", action="store_true", help="Post-process the saved image to --target-size")
+    parser.add_argument("--target-size", default="", help="Final WIDTHxHEIGHT after --upscale, for example 3840x2160")
+    parser.add_argument(
+        "--upscaler",
+        choices=("auto", "realesrgan", "sips", "pillow"),
+        default="auto",
+        help="Upscaler backend. realesrgan is AI; sips/pillow are non-AI resize fallbacks.",
+    )
+    parser.add_argument("--realesrgan-bin", default="realesrgan-ncnn-vulkan")
+    parser.add_argument("--realesrgan-model", default=DEFAULT_REALESRGAN_MODEL)
     parser.add_argument("--debug", action="store_true", help="Print timing and response metadata to stderr")
     args = parser.parse_args()
 
@@ -450,6 +733,16 @@ def main() -> int:
         result = request_multipart(f"{base}/v1/images/edits", api_key, fields, files, debug_log=debug_log)
 
     save_image(result, out_path, debug_log=debug_log)
+    if args.upscale:
+        maybe_upscale_image(
+            out_path,
+            enabled=True,
+            target_size=args.target_size or args.size,
+            upscaler=args.upscaler,
+            realesrgan_bin=args.realesrgan_bin,
+            realesrgan_model=args.realesrgan_model,
+            debug_log=debug_log,
+        )
     size = out_path.stat().st_size
     print(f"Saved {out_path} ({size} bytes)")
     return 0

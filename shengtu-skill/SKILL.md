@@ -62,6 +62,18 @@ Default desktop output:
 python scripts\generate_image.py --prompt "A clean product poster with clear subject and soft studio lighting" --size 1024x1024
 ```
 
+## 4K Upscale
+
+Use `--upscale --target-size 3840x2160` when the upstream returns a smaller image but the user needs a true 4K file. This is post-processing after generation, not native upstream 4K.
+
+Recommended customer setup for AI upscale: install `realesrgan-ncnn-vulkan` and make the binary available in `PATH`. The script will use it when `--upscaler auto` or `--upscaler realesrgan`.
+
+```powershell
+python scripts\generate_image.py --prompt "A clean cinematic rural banquet scene" --size 3840x2160 --quality high --upscale --target-size 3840x2160 --upscaler realesrgan --out banquet-4k.png
+```
+
+If Real-ESRGAN is not installed, `--upscaler auto` may fall back to `sips` on macOS or Pillow when installed. These fallback modes create a 4K file but are not AI super-resolution.
+
 ## Image Edit
 
 ```powershell
@@ -98,3 +110,4 @@ python scripts\generate_image.py --mode edit --prompt "Improve the lighting and 
 - The `Authorization` header uses only the dedicated image API key for this request.
 - The request does not modify global OpenAI or coding-skill credentials.
 - The output file exists and has nonzero size.
+- If `--upscale` is used, verify the final file dimensions match `--target-size`.
