@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import mimetypes
 import os
+import platform
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -18,6 +21,8 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import NamedTuple
+import zipfile
 
 
 DEFAULT_BASE_URL = "https://st.subarx.com"
@@ -29,6 +34,12 @@ DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_SECONDS = 180
 DEFAULT_MAX_RETRIES = 2
 RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 DEFAULT_REALESRGAN_MODEL = "realesrgan-x4plus"
+REALESRGAN_RELEASE_BASE_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0"
+
+
+class RealESRGANPackage(NamedTuple):
+    url: str
+    binary_name: str
 
 
 def config_dir() -> Path:
@@ -41,6 +52,10 @@ def config_dir() -> Path:
 
 def config_path() -> Path:
     return config_dir() / CONFIG_FILE_NAME
+
+
+def upscaler_tools_dir() -> Path:
+    return config_dir() / "tools"
 
 
 def windows_user_env(name: str) -> str | None:
@@ -429,6 +444,107 @@ def command_exists(name: str) -> str | None:
     return shutil.which(name)
 
 
+def platform_realesrgan_package() -> RealESRGANPackage:
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if system == "darwin":
+        return RealESRGANPackage(
+            url=f"{REALESRGAN_RELEASE_BASE_URL}/realesrgan-ncnn-vulkan-20220424-macos.zip",
+            binary_name="realesrgan-ncnn-vulkan",
+        )
+    if system == "windows":
+        return RealESRGANPackage(
+            url=f"{REALESRGAN_RELEASE_BASE_URL}/realesrgan-ncnn-vulkan-20220424-windows.zip",
+            binary_name="realesrgan-ncnn-vulkan.exe",
+        )
+    if system == "linux" and ("x86_64" in machine or "amd64" in machine):
+        return RealESRGANPackage(
+            url=f"{REALESRGAN_RELEASE_BASE_URL}/realesrgan-ncnn-vulkan-20220424-ubuntu.zip",
+            binary_name="realesrgan-ncnn-vulkan",
+        )
+    raise RuntimeError(f"Automatic Real-ESRGAN install is not supported on {platform.system()} {platform.machine()}")
+
+
+def iter_private_realesrgan_binaries(binary_name: str):
+    root = upscaler_tools_dir()
+    if not root.exists():
+        return
+    yield from root.rglob(binary_name)
+
+
+def resolve_realesrgan_binary(binary: str) -> str | None:
+    value = str(binary or "").strip()
+    if not value:
+        value = "realesrgan-ncnn-vulkan.exe" if os.name == "nt" else "realesrgan-ncnn-vulkan"
+    explicit = Path(value)
+    if explicit.exists():
+        return str(explicit)
+    found = command_exists(value)
+    if found:
+        return found
+    binary_name = explicit.name
+    for candidate in iter_private_realesrgan_binaries(binary_name):
+        if candidate.is_file():
+            return str(candidate)
+    if os.name == "nt" and not binary_name.endswith(".exe"):
+        for candidate in iter_private_realesrgan_binaries(binary_name + ".exe"):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+def download_file_with_retries(url: str, out_path: Path, *, max_retries: int = DEFAULT_MAX_RETRIES, debug_log=None) -> None:
+    debug = debug_log or (lambda _message: None)
+    last_error: BaseException | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            debug(f"download attempt {attempt + 1}/{max_retries + 1} url={url}")
+            req = urllib.request.Request(url, headers={"User-Agent": "shengtu-skill/1.0"})
+            with urllib.request.urlopen(req, timeout=DEFAULT_IMAGE_DOWNLOAD_TIMEOUT_SECONDS) as resp:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with out_path.open("wb") as fh:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+            return
+        except (urllib.error.URLError, TimeoutError, socket.timeout, http.client.RemoteDisconnected) as exc:
+            last_error = exc
+            try:
+                out_path.unlink()
+            except FileNotFoundError:
+                pass
+            debug(f"download_error attempt={attempt + 1} error={exc}")
+            if attempt >= max_retries:
+                raise RuntimeError(f"Download failed after {max_retries + 1} attempts: {url}") from exc
+            time.sleep(backoff_seconds(attempt + 1))
+    raise RuntimeError(f"Download failed: {url}") from last_error
+
+
+def install_realesrgan(*, install_root: Path | None = None, debug_log=None) -> Path:
+    package = platform_realesrgan_package()
+    root = install_root or upscaler_tools_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    debug = debug_log or (lambda _message: None)
+    with TemporaryDirectory() as tmp:
+        archive_path = Path(tmp) / "realesrgan.zip"
+        download_file_with_retries(package.url, archive_path, debug_log=debug_log)
+        extract_dir = root / "realesrgan-ncnn-vulkan"
+        if extract_dir.exists():
+            shutil.rmtree(extract_dir)
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extractall(extract_dir)
+    candidates = list(extract_dir.rglob(package.binary_name))
+    if not candidates:
+        raise RuntimeError(f"Installed package did not contain {package.binary_name}")
+    binary = candidates[0]
+    if os.name != "nt":
+        binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return binary
+
+
 def run_command(args: list[str], *, debug_log=None) -> None:
     debug = debug_log or (lambda _message: None)
     debug("run " + " ".join(args))
@@ -519,7 +635,8 @@ def run_realesrgan(
     model: str,
     debug_log=None,
 ) -> None:
-    if not command_exists(binary) and not Path(binary).exists():
+    resolved_binary = resolve_realesrgan_binary(binary)
+    if not resolved_binary:
         raise RuntimeError(
             f"{binary} is not installed. Install Real-ESRGAN ncnn Vulkan and make realesrgan-ncnn-vulkan available in PATH."
         )
@@ -532,7 +649,7 @@ def run_realesrgan(
         ai_out = Path(tmp) / f"realesrgan{input_path.suffix or '.png'}"
         run_command(
             [
-                binary,
+                resolved_binary,
                 "-i",
                 str(input_path),
                 "-o",
@@ -584,17 +701,21 @@ def resize_exact_image(
             return "sips"
     if upscaler != "auto":
         raise ValueError(f"unsupported upscaler: {upscaler}")
-    if command_exists(realesrgan_bin) or Path(realesrgan_bin).exists():
-        return resize_exact_image(
-            input_path,
-            out_path,
-            target_width,
-            target_height,
-            "realesrgan",
-            realesrgan_bin=realesrgan_bin,
-            realesrgan_model=realesrgan_model,
-            debug_log=debug_log,
-        )
+    if resolve_realesrgan_binary(realesrgan_bin):
+        try:
+            return resize_exact_image(
+                input_path,
+                out_path,
+                target_width,
+                target_height,
+                "realesrgan",
+                realesrgan_bin=realesrgan_bin,
+                realesrgan_model=realesrgan_model,
+                debug_log=debug_log,
+            )
+        except RuntimeError as exc:
+            if debug_log:
+                debug_log(f"realesrgan_failed_fallback error={exc}")
     try:
         return resize_exact_image(input_path, out_path, target_width, target_height, "pillow", debug_log=debug_log)
     except RuntimeError:
@@ -609,10 +730,14 @@ def maybe_upscale_image(
     upscaler: str,
     realesrgan_bin: str,
     realesrgan_model: str,
+    ensure_upscaler: bool = False,
     debug_log=None,
 ) -> None:
     if not enabled:
         return
+    if ensure_upscaler and upscaler in ("auto", "realesrgan") and not resolve_realesrgan_binary(realesrgan_bin):
+        binary = install_realesrgan(debug_log=debug_log)
+        realesrgan_bin = str(binary)
     target_width, target_height = parse_size(target_size)
     current = read_image_size(out_path)
     if current == (target_width, target_height):
@@ -648,6 +773,7 @@ def main() -> int:
     parser.add_argument("--save-api-key", help="Save a dedicated Subarx image API key to this skill's private config")
     parser.add_argument("--clear-api-key", action="store_true", help="Remove this skill's saved API key")
     parser.add_argument("--show-config-path", action="store_true", help="Print this skill's private config path")
+    parser.add_argument("--install-upscaler", action="store_true", help="Download Real-ESRGAN ncnn Vulkan into this skill's private tools directory and exit")
     parser.add_argument("--model", default="gpt-image-2")
     parser.add_argument("--quality", default="low")
     parser.add_argument("--n", type=int, default=1)
@@ -664,6 +790,7 @@ def main() -> int:
     )
     parser.add_argument("--realesrgan-bin", default="realesrgan-ncnn-vulkan")
     parser.add_argument("--realesrgan-model", default=DEFAULT_REALESRGAN_MODEL)
+    parser.add_argument("--ensure-upscaler", action="store_true", help="Install Real-ESRGAN automatically before upscaling if missing")
     parser.add_argument("--debug", action="store_true", help="Print timing and response metadata to stderr")
     args = parser.parse_args()
 
@@ -674,6 +801,13 @@ def main() -> int:
     if args.clear_api_key:
         removed = clear_config_api_key()
         print("Removed saved image API key." if removed else "No saved image API key found.")
+        return 0
+
+    debug_log = default_debug_log if args.debug else None
+
+    if args.install_upscaler:
+        binary = install_realesrgan(debug_log=debug_log)
+        print(f"Installed Real-ESRGAN upscaler: {binary}")
         return 0
 
     if args.save_api_key:
@@ -693,7 +827,6 @@ def main() -> int:
 
     base = resolved_base_url(args.base_url).rstrip("/")
     out_path = resolved_output_path(args.out, args.output_format)
-    debug_log = default_debug_log if args.debug else None
 
     if args.mode == "generate":
         payload = {
@@ -741,6 +874,7 @@ def main() -> int:
             upscaler=args.upscaler,
             realesrgan_bin=args.realesrgan_bin,
             realesrgan_model=args.realesrgan_model,
+            ensure_upscaler=args.ensure_upscaler,
             debug_log=debug_log,
         )
     size = out_path.stat().st_size

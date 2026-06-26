@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 import urllib.error
@@ -228,6 +229,62 @@ class UpscaleTests(unittest.TestCase):
 
             self.assertEqual("realesrgan", method)
             run_realesrgan.assert_called_once()
+
+    def test_auto_upscaler_falls_back_when_realesrgan_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src.png"
+            out = Path(tmp) / "out.png"
+            src.write_bytes(b"not-a-real-image")
+            with mock.patch.object(generate_image, "resolve_realesrgan_binary", return_value="/usr/local/bin/realesrgan-ncnn-vulkan"):
+                with mock.patch.object(generate_image, "run_realesrgan", side_effect=RuntimeError("vulkan failed")):
+                    with mock.patch.object(generate_image, "resize_exact_with_pillow", side_effect=RuntimeError("no pillow")):
+                        with mock.patch.object(generate_image, "resize_exact_with_sips") as resize_sips:
+                            method = generate_image.resize_exact_image(src, out, 3840, 2160, "auto")
+
+            self.assertEqual("sips", method)
+            resize_sips.assert_called_once()
+
+    def test_private_realesrgan_binary_is_discovered_when_not_on_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "tools" / "RealESRGAN" / "realesrgan-ncnn-vulkan"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("fake")
+            with mock.patch.object(generate_image, "command_exists", return_value=None):
+                with mock.patch.object(generate_image, "upscaler_tools_dir", return_value=Path(tmp) / "tools"):
+                    self.assertEqual(str(binary), generate_image.resolve_realesrgan_binary("realesrgan-ncnn-vulkan"))
+
+    def test_install_realesrgan_extracts_binary_to_private_tools_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "package.zip"
+            install_root = Path(tmp) / "tools"
+            with generate_image.zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("RealESRGAN/realesrgan-ncnn-vulkan", "binary")
+                archive.writestr("RealESRGAN/models/realesrgan-x4plus.param", "model")
+
+            with mock.patch.object(generate_image, "platform_realesrgan_package") as platform_package:
+                platform_package.return_value = generate_image.RealESRGANPackage(
+                    url="https://example.com/realesrgan.zip",
+                    binary_name="realesrgan-ncnn-vulkan",
+                )
+                with mock.patch.object(generate_image, "download_file_with_retries") as download:
+                    download.side_effect = lambda _url, dest, **_kwargs: Path(dest).write_bytes(package.read_bytes())
+                    binary = generate_image.install_realesrgan(install_root=install_root)
+
+            self.assertTrue(binary.exists())
+            self.assertEqual("realesrgan-ncnn-vulkan", binary.name)
+            self.assertTrue(os.access(binary, os.X_OK))
+
+    def test_download_file_retries_transient_disconnect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "download.zip"
+            success_response = mock.MagicMock()
+            success_response.__enter__.return_value.read.side_effect = [b"ok", b""]
+            with mock.patch.object(generate_image.urllib.request, "urlopen") as urlopen:
+                urlopen.side_effect = [generate_image.http.client.RemoteDisconnected("closed"), success_response]
+                generate_image.download_file_with_retries("https://example.com/file.zip", out)
+
+            self.assertEqual("ok", out.read_text())
+            self.assertEqual(2, urlopen.call_count)
 
 
 if __name__ == "__main__":

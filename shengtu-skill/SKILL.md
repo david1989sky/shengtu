@@ -68,11 +68,21 @@ Use `--upscale --target-size 3840x2160` when the upstream returns a smaller imag
 
 Recommended customer setup for AI upscale: install `realesrgan-ncnn-vulkan` and make the binary available in `PATH`. The script will use it when `--upscaler auto` or `--upscaler realesrgan`.
 
+One-time automatic install into this skill's private tools directory:
+
 ```powershell
-python scripts\generate_image.py --prompt "A clean cinematic rural banquet scene" --size 3840x2160 --quality high --upscale --target-size 3840x2160 --upscaler realesrgan --out banquet-4k.png
+python scripts\generate_image.py --install-upscaler
+```
+
+Generate and install the upscaler automatically if missing:
+
+```powershell
+python scripts\generate_image.py --prompt "A clean cinematic rural banquet scene" --size 3840x2160 --quality high --upscale --target-size 3840x2160 --upscaler realesrgan --ensure-upscaler --out banquet-4k.png
 ```
 
 If Real-ESRGAN is not installed, `--upscaler auto` may fall back to `sips` on macOS or Pillow when installed. These fallback modes create a 4K file but are not AI super-resolution.
+
+If Real-ESRGAN is installed but fails at runtime because Vulkan/GPU support is unavailable, `--upscaler auto` falls back to local resizing. Use `--upscaler realesrgan` when the customer wants strict AI upscale and prefers an explicit failure over fallback.
 
 ## Image Edit
 
